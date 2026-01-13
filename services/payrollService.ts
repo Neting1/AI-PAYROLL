@@ -1,5 +1,6 @@
 
 import { PayrollRecord } from '../types';
+import { GoogleGenAI, Type } from "@google/genai";
 
 // Ghana Revenue Authority (GRA) Tax Bands (Monthly - 2023/2024)
 const calculatePAYE = (chargeableIncome: number): number => {
@@ -89,38 +90,94 @@ export const calculatePayroll = (
   };
 };
 
+// Helper to convert File to Base64
+const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = (error) => reject(error);
+    });
+};
+
 /**
- * Parses an uploaded file to extract payroll data.
- * In a full production env, this would send the File to the Backend for OCR/Parsing.
- * For this client-side secure version, we read the file metadata and allow manual processing.
+ * Parses an uploaded file to extract payroll data using Gemini API.
  */
 export const processPayrollDocument = async (file: File, targetUser: any): Promise<PayrollRecord[]> => {
   
-  // Real world: Verify file type strictness
-  if (file.type !== 'application/pdf') {
-    throw new Error('Invalid file type. Only PDF documents are authorized.');
+  // Check for API Key
+  if (!process.env.API_KEY || process.env.API_KEY.includes('YOUR_')) {
+     console.warn("Gemini API Key missing. Using fallback manual processing.");
+     // Fallback to default manual entry if no key
+     const baseSalary = 5000;
+     const allowance = 0;
+     const record = calculatePayroll(
+        targetUser.employeeId || 'EMP-UNK',
+        targetUser.name,
+        'General Staff',
+        targetUser.position || 'Staff',
+        baseSalary,
+        allowance
+     );
+     record.status = 'PAID';
+     return [record];
   }
 
-  // NOTE: Without a backend OCR service, we default to standard salary structure for the user.
-  // In V2, integrate Tesseract.js or a Server-Side parser here.
-  
-  // No fake delays. Immediate processing.
-  
-  // We use a default structure based on the target user's metadata or defaults
-  // This allows the Admin to "upload" a PDF (for record keeping) and generate the entry.
-  const baseSalary = 5000; // Standard Base
-  const allowance = 0;
+  try {
+      const base64Str = await fileToBase64(file);
+      // Remove data:application/pdf;base64, prefix
+      const base64Data = base64Str.split(',')[1];
+      
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      
+      // Use gemini-3-flash-preview as it supports multimodal inputs (like PDFs/Images) efficiently
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: {
+            parts: [
+                {
+                    inlineData: {
+                        mimeType: file.type, // e.g. 'application/pdf'
+                        data: base64Data
+                    }
+                },
+                {
+                    text: "Extract payroll details from this document. Return JSON with keys: basicSalary (number), allowances (number), employeeId (string), employeeName (string), position (string)."
+                }
+            ]
+        },
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    basicSalary: { type: Type.NUMBER },
+                    allowances: { type: Type.NUMBER },
+                    employeeId: { type: Type.STRING },
+                    employeeName: { type: Type.STRING },
+                    position: { type: Type.STRING }
+                },
+                required: ["basicSalary", "allowances"]
+            }
+        }
+      });
 
-  const record = calculatePayroll(
-    targetUser.employeeId || 'EMP-UNK',
-    targetUser.name,
-    'General Staff',
-    targetUser.position || 'Staff',
-    baseSalary,
-    allowance
-  );
-  
-  record.status = 'PAID'; 
+      const data = JSON.parse(response.text);
 
-  return [record];
+      const record = calculatePayroll(
+        data.employeeId || targetUser.employeeId,
+        data.employeeName || targetUser.name,
+        'General Staff',
+        data.position || targetUser.position || 'Staff',
+        data.basicSalary || 0,
+        data.allowances || 0
+      );
+      
+      record.status = 'PAID';
+      return [record];
+
+  } catch (error) {
+      console.error("Gemini Extraction Failed:", error);
+      throw new Error("Failed to process document with AI. Please check your API Key or file format.");
+  }
 };
