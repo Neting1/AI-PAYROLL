@@ -1,0 +1,5 @@
+{
+  "name": "Twin Hill Enterprise Payroll",
+  "description": "A Ghana-compliant payroll management system featuring PDF ingestion, automated tax calculations (GRA/SSNIT), and interactive dashboards for Admins and Employees.",
+  "requestFramePermissions": []
+}
